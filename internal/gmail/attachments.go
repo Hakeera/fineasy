@@ -9,65 +9,76 @@ import (
 	gmailapi "google.golang.org/api/gmail/v1"
 )
 
-// percorre recursivamente as partes
-func (s *Service) ExtractPDFs(msg *gmailapi.Message) error {
+type PDFResult struct {
+	Filename string
+	MimeType string
+	Path     string
+}
+
+func (s *Service) ExtractPDFs(msg *gmailapi.Message) ([]PDFResult, error) {
 	return s.walkParts(msg.Payload.Parts, msg.Id)
 }
 
-func (s *Service) walkParts(parts []*gmailapi.MessagePart, msgID string) error {
-	for _, p := range parts {
+func (s *Service) walkParts(parts []*gmailapi.MessagePart, msgID string) ([]PDFResult, error) {
+	var results []PDFResult
 
-		// se tiver subpartes → recursão
+	for _, p := range parts {
 		if len(p.Parts) > 0 {
-			if err := s.walkParts(p.Parts, msgID); err != nil {
-				return err
+			sub, err := s.walkParts(p.Parts, msgID)
+			if err != nil {
+				return nil, err
 			}
+			results = append(results, sub...)
 			continue
 		}
 
-		// filtrar PDF
 		if p.Filename == "" || p.MimeType != "application/pdf" {
 			continue
 		}
-
-		fmt.Println("PDF encontrado:", p.Filename)
 
 		if p.Body == nil || p.Body.AttachmentId == "" {
 			continue
 		}
 
-		err := s.downloadAttachment(msgID, p.Body.AttachmentId, p.Filename)
+		fmt.Println("PDF encontrado:", p.Filename)
+
+		path, err := s.downloadAttachment(msgID, p.Body.AttachmentId, p.Filename)
 		if err != nil {
 			fmt.Println("Erro ao baixar:", err)
+			continue
 		}
+
+		results = append(results, PDFResult{
+			Filename: p.Filename,
+			MimeType: p.MimeType,
+			Path:     path,
+		})
 	}
 
-	return nil
+	return results, nil
 }
 
-func (s *Service) downloadAttachment(msgID, attachID, filename string) error {
+func (s *Service) downloadAttachment(msgID, attachID, filename string) (string, error) {
 	att, err := s.srv.Users.Messages.Attachments.Get("me", msgID, attachID).Do()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	data, err := base64.URLEncoding.DecodeString(att.Data)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	// diretório pdfs
 	dir := "data/pdfs"
-	os.MkdirAll(dir, os.ModePerm)
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		return "", err
+	}
 
 	path := filepath.Join(dir, msgID+"_"+filename)
-
-	err = os.WriteFile(path, data, 0644)
-	if err != nil {
-		return err
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", err
 	}
 
 	fmt.Println("Salvo em:", path)
-
-	return nil
+	return path, nil
 }
