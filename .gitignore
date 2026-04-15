@@ -38,3 +38,8 @@ data/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# PYTHON
+.venv/
+__pycache__/
+*.pyc

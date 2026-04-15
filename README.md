@@ -158,3 +158,32 @@ Os arquivos são salvos com o padrão `data/pdfs/<gmail_id>_<nome_do_arquivo>.pd
 | `google.golang.org/api/gmail/v1` | Cliente oficial da Gmail API |
 | `golang.org/x/oauth2/google` | Fluxo OAuth2 |
 | `github.com/jackc/pgx/v5` | Driver PostgreSQL |
+
+
+# Python - pdfplumber
+
+## Criação do ambiente
+
+```
+# Na raiz do projeto
+python -m venv .venv
+
+# Ativar (Windows)
+.venv\Scripts\activate
+
+# Ativar (Linux/Mac)
+source .venv/bin/activate
+
+# Instalar dependências
+pip install pdfplumber
+
+# Salvar o que foi instalado (fundamental para replicar)
+pip freeze > requirements.txt
+```
+## Replicar amibente
+
+```
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
