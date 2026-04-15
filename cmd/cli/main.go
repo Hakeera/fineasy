@@ -34,6 +34,8 @@ func main() {
 	}
 	defer conn.Close(ctx)
 
+	repo := storage.NewEmailRepository(conn)
+
 	fmt.Println("Conectado ao banco!")
 
 	client := auth.GetClient(config)
@@ -43,7 +45,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	msgs, err := gService.ListMessages("in:inbox", 5)
+	msgs, err := gService.ListMessages(
+		"in:inbox has:attachment filename:pdf",
+		15,
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -54,12 +59,44 @@ func main() {
 			continue
 		}
 
-		fmt.Println("------")
+		var subject, from, date string
 
 		for _, h := range msg.Payload.Headers {
-			if h.Name == "Subject" || h.Name == "From" {
-				fmt.Println(h.Name+":", h.Value)
+
+			switch h.Name {
+			case "Subject":
+				subject = h.Value
+			case "From":
+				from = h.Value
+			case "Date":
+				date = h.Value
 			}
+		}
+
+		email := storage.Email{
+			GmailID:    msg.Id,
+			Subject:    subject,
+			From:       from,
+			ReceivedAt: date,
+		}
+
+		// Salvar email no banco
+		inserted, err := repo.Save(ctx, email)
+		if err != nil {
+			log.Println("Erro ao salvar:", err)
+			continue
+		}
+		if !inserted {
+			fmt.Println("Já existe, pulando:", subject)
+			continue
+		}
+
+		fmt.Println("Novo email:", subject)
+
+		// Salvar Pdf
+		err = gService.ExtractPDFs(msg)
+		if err != nil {
+			log.Println("Erro ao extrair PDFs:", err)
 		}
 	}
 }
