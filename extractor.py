@@ -1,12 +1,11 @@
 """
-extractor.py — extrai campos de boletos bancários em PDF.
+extractor.py — extrai campos de boletos bancários e notas fiscais (DANFE) em PDF.
 
-Uso:
+Uso CLI:
     python extractor.py <caminho_do_pdf>
 
-Saída:
-    JSON com os campos extraídos (stdout)
-    Em caso de erro: JSON com campo "error"
+Uso como módulo:
+    from extractor import extrair_pdf
 """
 
 import sys
@@ -16,123 +15,99 @@ import pdfplumber
 
 
 # ---------------------------------------------------------------------------
-# Padrões regex
+# Regex
 # ---------------------------------------------------------------------------
 
-# CNPJ: XX.XXX.XXX/XXXX-XX
-RE_CNPJ = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
-
-# Valor monetário: R$ 1.234,56  ou  1.234,56
+RE_CNPJ = re.compile(r"\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}")
 RE_VALOR = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
+RE_DATA  = re.compile(r"\d{2}/\d{2}/\d{4}")
 
-# Data: DD/MM/AAAA
-RE_DATA = re.compile(r"\d{2}/\d{2}/\d{4}")
-
-# Linha digitável / código de barras
-# Formato: AAAAA.BBBBB CCCCC.CCCCCC DDDDD.DDDDDD E FFFFFFFFFFFFFFFFF
 RE_LINHA_DIGITAVEL = re.compile(
     r"\d{5}\.\d{5}\s+\d{5}\.\d{6}\s+\d{5}\.\d{6}\s+\d\s+\d{14,15}"
 )
-# Código de barras numérico puro (47 ou 48 dígitos)
 RE_COD_BARRAS = re.compile(r"\d{47,48}")
+RE_CHAVE_NFE = re.compile(r"(?:\d{4}\s?){11}(?:\d{4})")
 
 
 # ---------------------------------------------------------------------------
-# Rótulos que costumam aparecer próximos ao vencimento
+# Config
 # ---------------------------------------------------------------------------
-ROTULOS_VENCIMENTO = [
-    "vencimento",
-    "data de vencimento",
-    "venc.",
-    "venc ",
-    "validade",
-]
 
-ROTULOS_VALOR = [
-    "valor do documento",
-    "valor cobrado",
-    "valor a pagar",
-    "valor",
-    "(=) valor cobrado",
+MEUS_CNPJS = [
+    "12.345.678/0001-90",
+    "98.765.432/0001-10",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Funções de extração
+# Utils
 # ---------------------------------------------------------------------------
 
-def extrair_cnpj(texto: str) -> str | None:
-    """Retorna o primeiro CNPJ encontrado no texto."""
-    match = RE_CNPJ.search(texto)
-    return match.group(0) if match else None
+def normalizar_cnpj(cnpj: str) -> str:
+    return re.sub(r"\D", "", cnpj)
 
 
-def extrair_valor(texto: str, linhas: list[str]) -> str | None:
-    """
-    Tenta encontrar o valor buscando por rótulos conhecidos primeiro.
-    Fallback: primeiro valor monetário do texto.
-    """
-    linhas_lower = [l.lower() for l in linhas]
+def identificar_pagador_por_lista(cnpjs_encontrados, meus_cnpjs):
+    meus_cnpjs_norm = {normalizar_cnpj(c) for c in meus_cnpjs}
 
-    for i, linha in enumerate(linhas_lower):
-        for rotulo in ROTULOS_VALOR:
-            if rotulo in linha:
-                # Procura o valor na mesma linha ou na próxima
-                for candidata in linhas[i:i+3]:
-                    match = RE_VALOR.search(candidata)
-                    if match:
-                        return match.group(1)
+    pagador = None
+    emitente = None
 
-    # Fallback: primeiro valor monetário do texto inteiro
-    match = RE_VALOR.search(texto)
-    return match.group(1) if match else None
+    for cnpj in cnpjs_encontrados:
+        cnpj_norm = normalizar_cnpj(cnpj)
 
+        if cnpj_norm in meus_cnpjs_norm:
+            pagador = cnpj
+        else:
+            if not emitente:
+                emitente = cnpj
 
-def extrair_vencimento(texto: str, linhas: list[str]) -> str | None:
-    """
-    Busca a data de vencimento procurando por rótulos conhecidos.
-    Fallback: primeira data do texto.
-    """
-    linhas_lower = [l.lower() for l in linhas]
-
-    for i, linha in enumerate(linhas_lower):
-        for rotulo in ROTULOS_VENCIMENTO:
-            if rotulo in linha:
-                for candidata in linhas[i:i+3]:
-                    match = RE_DATA.search(candidata)
-                    if match:
-                        return match.group(0)
-
-    # Fallback: primeira data encontrada
-    match = RE_DATA.search(texto)
-    return match.group(0) if match else None
-
-
-def extrair_codigo_barras(texto: str) -> str | None:
-    """
-    Tenta extrair a linha digitável formatada primeiro.
-    Fallback: código de barras numérico puro (47-48 dígitos).
-    Retorna sempre só os dígitos.
-    """
-    match = RE_LINHA_DIGITAVEL.search(texto)
-    if match:
-        # Remove espaços e pontos — retorna só dígitos
-        return re.sub(r"[\s.]", "", match.group(0))
-
-    match = RE_COD_BARRAS.search(texto)
-    return match.group(0) if match else None
+    return pagador, emitente
 
 
 # ---------------------------------------------------------------------------
-# Leitura do PDF
+# Tipo doc
 # ---------------------------------------------------------------------------
 
-def extrair_texto_pdf(caminho: str) -> tuple[str, list[str]]:
-    """
-    Lê todas as páginas do PDF e retorna:
-    - texto completo concatenado
-    - lista de linhas (sem linhas vazias)
-    """
+MARCADORES_DANFE = [
+    "danfe",
+    "documento auxiliar da nota fiscal eletrônica",
+    "nota fiscal eletrônica",
+    "nf-e",
+    "chave de acesso",
+]
+
+MARCADORES_BOLETO = [
+    "ficha de compensação",
+    "boleto bancário",
+    "boleto",
+    "linha digitável",
+    "beneficiário",
+    "nosso número",
+    "cedente",
+]
+
+
+def identificar_tipo(texto_lower):
+    score_danfe  = sum(1 for m in MARCADORES_DANFE  if m in texto_lower)
+    score_boleto = sum(1 for m in MARCADORES_BOLETO if m in texto_lower)
+
+    if score_danfe >= 2:
+        return "danfe"
+    if score_boleto >= 2:
+        return "boleto"
+    if score_danfe > score_boleto:
+        return "danfe"
+    if score_boleto > score_danfe:
+        return "boleto"
+    return "desconhecido"
+
+
+# ---------------------------------------------------------------------------
+# Extrações
+# ---------------------------------------------------------------------------
+
+def extrair_texto_pdf(caminho):
     texto_completo = []
 
     with pdfplumber.open(caminho) as pdf:
@@ -143,36 +118,106 @@ def extrair_texto_pdf(caminho: str) -> tuple[str, list[str]]:
 
     texto = "\n".join(texto_completo)
     linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+
     return texto, linhas
 
 
+def extrair_valor(texto, linhas, tipo):
+    rotulos = ["valor total", "valor a pagar"] if tipo == "danfe" else ["valor"]
+
+    linhas_lower = [l.lower() for l in linhas]
+
+    for i, linha in enumerate(linhas_lower):
+        for rotulo in rotulos:
+            if rotulo in linha:
+                for candidata in linhas[i:i+3]:
+                    match = RE_VALOR.search(candidata)
+                    if match:
+                        return match.group(1)
+
+    match = RE_VALOR.search(texto)
+    return match.group(1) if match else None
+
+
+def extrair_vencimento(texto, linhas, tipo):
+    rotulos = ["data de emissão"] if tipo == "danfe" else ["vencimento"]
+
+    linhas_lower = [l.lower() for l in linhas]
+
+    for i, linha in enumerate(linhas_lower):
+        for rotulo in rotulos:
+            if rotulo in linha:
+                for candidata in linhas[i:i+3]:
+                    match = RE_DATA.search(candidata)
+                    if match:
+                        return match.group(0)
+
+    match = RE_DATA.search(texto)
+    return match.group(0) if match else None
+
+
+def extrair_codigo_barras(texto):
+    match = RE_LINHA_DIGITAVEL.search(texto)
+    if match:
+        return re.sub(r"[\s.]", "", match.group(0))
+
+    match = RE_COD_BARRAS.search(texto)
+    return match.group(0) if match else None
+
+
+def extrair_chave_nfe(texto):
+    match = RE_CHAVE_NFE.search(texto)
+    if match:
+        return re.sub(r"\s", "", match.group(0))
+    return None
+
+
 # ---------------------------------------------------------------------------
-# Main
+# FUNÇÃO PRINCIPAL (IMPORTÁVEL)
+# ---------------------------------------------------------------------------
+
+def extrair_pdf(caminho_pdf: str) -> dict:
+    try:
+        texto, linhas = extrair_texto_pdf(caminho_pdf)
+    except Exception as e:
+        return {"error": str(e), "arquivo": caminho_pdf}
+
+    tipo = identificar_tipo(texto.lower())
+
+    todos_cnpjs = RE_CNPJ.findall(texto)
+    cnpjs_unicos = list(dict.fromkeys(todos_cnpjs))
+
+    cnpj_pagador_lista, cnpj_emitente_lista = identificar_pagador_por_lista(
+        cnpjs_unicos,
+        MEUS_CNPJS
+    )
+
+    resultado = {
+        "tipo": tipo,
+        "legivel": True,
+        "arquivo": caminho_pdf,
+        "cnpj_emitente": cnpj_emitente_lista,
+        "cnpj_pagador": cnpj_pagador_lista,
+        "valor": extrair_valor(texto, linhas, tipo),
+        "vencimento": extrair_vencimento(texto, linhas, tipo),
+        "cod_barras": extrair_codigo_barras(texto) if tipo == "boleto" else None,
+        "chave_nfe": extrair_chave_nfe(texto) if tipo == "danfe" else None,
+    }
+
+    return resultado
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "Uso: python extractor.py <caminho_do_pdf>"}))
+        print(json.dumps({"error": "Uso: python extractor.py <pdf>"}))
         sys.exit(1)
 
     caminho = sys.argv[1]
-
-    try:
-        texto, linhas = extrair_texto_pdf(caminho)
-    except FileNotFoundError:
-        print(json.dumps({"error": f"Arquivo não encontrado: {caminho}"}))
-        sys.exit(1)
-    except Exception as e:
-        print(json.dumps({"error": f"Erro ao ler PDF: {str(e)}"}))
-        sys.exit(1)
-
-    resultado = {
-        "cnpj":          extrair_cnpj(texto),
-        "valor":         extrair_valor(texto, linhas),
-        "vencimento":    extrair_vencimento(texto, linhas),
-        "cod_barras":    extrair_codigo_barras(texto),
-        "legivel":       True,   # PDF digital lido com sucesso
-    }
+    resultado = extrair_pdf(caminho)
 
     print(json.dumps(resultado, ensure_ascii=False))
 
