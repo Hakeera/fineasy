@@ -28,7 +28,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Conexão DB
+	// ── Banco de dados ────────────────────────────────────────────────────────
 	conn, err := storage.NewConnection(ctx)
 	if err != nil {
 		log.Fatal(err)
@@ -37,11 +37,21 @@ func main() {
 
 	emailRepo := storage.NewEmailRepository(conn)
 	attachRepo := storage.NewAttachmentRepository(conn)
-
 	fmt.Println("Conectado ao banco!")
 
-	client := auth.GetClient(config)
+	// ── CSV ───────────────────────────────────────────────────────────────────
+	csvEmailRepo, err := storage.NewCSVEmailRepository("data/emails.csv")
+	if err != nil {
+		log.Fatal("Erro ao inicializar CSV de emails:", err)
+	}
 
+	csvAttachRepo, err := storage.NewCSVAttachmentRepository("data/attachments.csv")
+	if err != nil {
+		log.Fatal("Erro ao inicializar CSV de attachments:", err)
+	}
+
+	// ── Gmail ─────────────────────────────────────────────────────────────────
+	client := auth.GetClient(config)
 	gService, err := gmailclient.New(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatal(err)
@@ -81,16 +91,22 @@ func main() {
 			ReceivedAt: date,
 		}
 
+		// Salva no banco
 		inserted, emailID, err := emailRepo.Save(ctx, email)
 		if err != nil {
-			log.Println("Erro ao salvar e-mail:", err)
+			log.Println("Erro ao salvar e-mail no banco:", err)
 			continue
 		}
+
+		// Salva no CSV (usa o mesmo emailID do banco para manter consistência)
+		if _, _, csvErr := csvEmailRepo.Save(ctx, email); csvErr != nil {
+			log.Println("Erro ao salvar e-mail no CSV:", csvErr)
+		}
+
 		if !inserted {
 			fmt.Println("Já existe, pulando:", subject)
 			continue
 		}
-
 		fmt.Println("Novo e-mail:", subject)
 
 		pdfs, err := gService.ExtractPDFs(msg)
@@ -106,8 +122,15 @@ func main() {
 				MimeType: pdf.MimeType,
 				Path:     pdf.Path,
 			}
+
+			// Salva no banco
 			if err := attachRepo.Save(ctx, attachment); err != nil {
-				log.Println("Erro ao salvar attachment:", err)
+				log.Println("Erro ao salvar attachment no banco:", err)
+			}
+
+			// Salva no CSV
+			if err := csvAttachRepo.Save(ctx, attachment); err != nil {
+				log.Println("Erro ao salvar attachment no CSV:", err)
 			}
 		}
 	}
