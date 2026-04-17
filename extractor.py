@@ -174,6 +174,28 @@ def extrair_chave_nfe(texto):
         return re.sub(r"\s", "", match.group(0))
     return None
 
+# ---------------------------------------------------------------------------
+# Validação de CNPJ com dígito verificador
+# ---------------------------------------------------------------------------
+
+def validar_cnpj(cnpj: str) -> bool:
+    nums = re.sub(r"\D", "", cnpj)
+    if len(nums) != 14 or len(set(nums)) == 1:
+        return False
+
+    def calc_digito(nums, pesos):
+        soma = sum(int(n) * p for n, p in zip(nums, pesos))
+        resto = soma % 11
+        return 0 if resto < 2 else 11 - resto
+
+    pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    pesos2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+
+    d1 = calc_digito(nums[:12], pesos1)
+    d2 = calc_digito(nums[:13], pesos2)
+
+    return nums[12] == str(d1) and nums[13] == str(d2)
+
 
 # ---------------------------------------------------------------------------
 # FUNÇÃO PRINCIPAL (IMPORTÁVEL)
@@ -188,6 +210,7 @@ def extrair_pdf(caminho_pdf: str) -> dict:
     tipo = identificar_tipo(texto.lower())
 
     todos_cnpjs = RE_CNPJ.findall(texto)
+    todos_cnpjs = [c for c in todos_cnpjs if validar_cnpj(c)]
     cnpjs_unicos = list(dict.fromkeys(todos_cnpjs))
 
     cnpj_pagador_lista, cnpj_emitente_lista = identificar_pagador_por_lista(
@@ -203,8 +226,6 @@ def extrair_pdf(caminho_pdf: str) -> dict:
         "cnpj_pagador": cnpj_pagador_lista,
         "valor": extrair_valor(texto, linhas, tipo),
         "vencimento": extrair_vencimento(texto, linhas, tipo),
-        "cod_barras": extrair_codigo_barras(texto) if tipo == "boleto" else None,
-        "chave_nfe": extrair_chave_nfe(texto) if tipo == "danfe" else None,
     }
 
     return resultado
