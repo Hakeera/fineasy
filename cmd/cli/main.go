@@ -18,43 +18,34 @@ import (
 func main() {
 	ctx := context.Background()
 
+	// ── Credenciais Gmail ─────────────────────────────────────────────────────
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Erro ao ler credentials.json:", err)
 	}
-
 	config, err := google.ConfigFromJSON(b, gmailapi.GmailReadonlyScope)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Erro ao configurar OAuth:", err)
 	}
 
-	// ── Banco de dados ────────────────────────────────────────────────────────
-	conn, err := storage.NewConnection(ctx)
+	// ── Repositórios CSV ──────────────────────────────────────────────────────
+	emailRepo, err := storage.NewEmailRepository("data/emails.csv")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Erro ao inicializar repositório de e-mails:", err)
 	}
-	defer conn.Close(ctx)
 
-	emailRepo := storage.NewEmailRepository(conn)
-	attachRepo := storage.NewAttachmentRepository(conn)
-	fmt.Println("Conectado ao banco!")
-
-	// ── CSV ───────────────────────────────────────────────────────────────────
-	csvEmailRepo, err := storage.NewCSVEmailRepository("data/emails.csv")
+	attachRepo, err := storage.NewAttachmentRepository("data/attachments.csv")
 	if err != nil {
-		log.Fatal("Erro ao inicializar CSV de emails:", err)
+		log.Fatal("Erro ao inicializar repositório de attachments:", err)
 	}
 
-	csvAttachRepo, err := storage.NewCSVAttachmentRepository("data/attachments.csv")
-	if err != nil {
-		log.Fatal("Erro ao inicializar CSV de attachments:", err)
-	}
+	fmt.Println("Repositórios CSV prontos.")
 
-	// ── Gmail ─────────────────────────────────────────────────────────────────
+	// ── Cliente Gmail ─────────────────────────────────────────────────────────
 	client := auth.GetClient(config)
 	gService, err := gmailclient.New(ctx, option.WithHTTPClient(client))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Erro ao criar cliente Gmail:", err)
 	}
 
 	msgs, err := gService.ListMessages(
@@ -62,9 +53,12 @@ func main() {
 		15,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Erro ao listar mensagens:", err)
 	}
 
+	fmt.Printf("%d mensagem(ns) encontrada(s).\n", len(msgs))
+
+	// ── Processamento ─────────────────────────────────────────────────────────
 	for _, m := range msgs {
 		msg, err := gService.GetMessage(m.Id)
 		if err != nil {
@@ -91,22 +85,17 @@ func main() {
 			ReceivedAt: date,
 		}
 
-		// Salva no banco
 		inserted, emailID, err := emailRepo.Save(ctx, email)
 		if err != nil {
-			log.Println("Erro ao salvar e-mail no banco:", err)
+			log.Println("Erro ao salvar e-mail:", err)
 			continue
-		}
-
-		// Salva no CSV (usa o mesmo emailID do banco para manter consistência)
-		if _, _, csvErr := csvEmailRepo.Save(ctx, email); csvErr != nil {
-			log.Println("Erro ao salvar e-mail no CSV:", csvErr)
 		}
 
 		if !inserted {
 			fmt.Println("Já existe, pulando:", subject)
 			continue
 		}
+
 		fmt.Println("Novo e-mail:", subject)
 
 		pdfs, err := gService.ExtractPDFs(msg)
@@ -122,16 +111,11 @@ func main() {
 				MimeType: pdf.MimeType,
 				Path:     pdf.Path,
 			}
-
-			// Salva no banco
 			if err := attachRepo.Save(ctx, attachment); err != nil {
-				log.Println("Erro ao salvar attachment no banco:", err)
-			}
-
-			// Salva no CSV
-			if err := csvAttachRepo.Save(ctx, attachment); err != nil {
-				log.Println("Erro ao salvar attachment no CSV:", err)
+				log.Println("Erro ao salvar attachment:", err)
 			}
 		}
 	}
+
+	fmt.Println("Concluído.")
 }

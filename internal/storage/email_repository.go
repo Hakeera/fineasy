@@ -2,10 +2,13 @@ package storage
 
 import (
 	"context"
+	"encoding/csv"
+	storage "fineasy/internal"
 	"fmt"
+	"os"
+	"strconv"
+	"sync"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Formatos de data usados pelos servidores de e-mail
@@ -33,41 +36,120 @@ type Email struct {
 	ReceivedAt string // string crua vinda do header do Gmail
 }
 
+// EmailRepository persiste e-mails em CSV.
+// Os gmail_id já processados são carregados em memória na inicialização,
+// evitando leituras repetidas do disco a cada Save.
 type EmailRepository struct {
-	conn *pgx.Conn
+	mu       sync.Mutex
+	filePath string
+	seen     map[string]struct{} // gmail_id já existentes
+	nextID   int64
 }
 
-func NewEmailRepository(conn *pgx.Conn) *EmailRepository {
-	return &EmailRepository{conn: conn}
+func NewEmailRepository(filePath string) (*EmailRepository, error) {
+	r := &EmailRepository{
+		filePath: filePath,
+		seen:     make(map[string]struct{}),
+	}
+	if err := r.load(); err != nil {
+		return nil, fmt.Errorf("email repository: %w", err)
+	}
+	return r, nil
 }
 
-// Save insere o e-mail e retorna (true, id) se foi inserido, (false, 0) se já existia.
-func (r *EmailRepository) Save(ctx context.Context, e Email) (bool, int, error) {
-	receivedAt, err := parseEmailDate(e.ReceivedAt)
-	if err != nil {
-		return false, 0, fmt.Errorf("received_at inválido: %w", err)
+// load cria o arquivo (com cabeçalho) se não existir,
+// ou lê os registros existentes para popular o cache em memória.
+func (r *EmailRepository) load() error {
+	if _, err := os.Stat(r.filePath); os.IsNotExist(err) {
+		return r.writeHeader()
 	}
 
-	var id int
-	err = r.conn.QueryRow(ctx, `
-		INSERT INTO emails (gmail_id, subject, from_email, received_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (gmail_id) DO NOTHING
-		RETURNING id
-	`,
+	f, err := os.Open(r.filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	rows, err := csv.NewReader(f).ReadAll()
+	if err != nil {
+		return err
+	}
+
+	var maxID int64
+	for i, row := range rows {
+		if i == 0 {
+			continue // cabeçalho
+		}
+		if len(row) < 2 {
+			continue
+		}
+		r.seen[row[1]] = struct{}{} // coluna gmail_id
+		if id, err := strconv.ParseInt(row[0], 10, 64); err == nil && id > maxID {
+			maxID = id
+		}
+	}
+	r.nextID = maxID + 1
+	return nil
+}
+
+func (r *EmailRepository) writeHeader() error {
+	if err := os.MkdirAll(storage.DirOf(r.filePath), os.ModePerm); err != nil {
+		return err
+	}
+	f, err := os.Create(r.filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	if err := w.Write([]string{"id", "gmail_id", "subject", "from", "received_at"}); err != nil {
+		return err
+	}
+	w.Flush()
+	return w.Error()
+}
+
+// Save insere o e-mail no CSV e retorna (true, id) se inserido,
+// (false, 0, nil) se o gmail_id já existia.
+func (r *EmailRepository) Save(_ context.Context, e Email) (bool, int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.seen[e.GmailID]; exists {
+		return false, 0, nil
+	}
+
+	// Normaliza a data para exibição legível no CSV/Excel
+	receivedAt := e.ReceivedAt
+	if t, err := parseEmailDate(e.ReceivedAt); err == nil {
+		receivedAt = t.Format("2006-01-02 15:04:05")
+	}
+
+	f, err := os.OpenFile(r.filePath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return false, 0, err
+	}
+	defer f.Close()
+
+	id := r.nextID
+	w := csv.NewWriter(f)
+	record := []string{
+		strconv.FormatInt(id, 10),
 		e.GmailID,
 		e.Subject,
 		e.From,
 		receivedAt,
-	).Scan(&id)
-
-	if err != nil {
-		// RETURNING não retorna nada em caso de DO NOTHING — não é erro real
-		if err.Error() == "no rows in result set" {
-			return false, 0, nil
-		}
+	}
+	if err := w.Write(record); err != nil {
+		return false, 0, err
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
 		return false, 0, err
 	}
 
+	r.seen[e.GmailID] = struct{}{}
+	r.nextID++
 	return true, id, nil
 }
